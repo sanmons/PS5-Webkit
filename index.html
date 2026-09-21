@@ -148,8 +148,6 @@ async function loadExploitModules() {
     }
 }
 
-// loadExploitModules() will be called after DOM elements are ready
-
 const OFFSETS_URL = "offsets/offsets.json";
 const DEFAULT_LISTENER_PORT = "9026";
 
@@ -179,6 +177,8 @@ const BUILTIN_PAYLOADS = [
     { file: "PLK.elf", name: "PLK (PS5Link)", desc: "PS5Link server for app debugging", icon: "🔗", color: "#f472b6", port: 9025 },
     { file: "shadowmountplus.elf", name: "ShadowMount+", desc: "Mount games/backups from USB/network", icon: "💾", color: "#fbbf24", port: 9027 },
 ];
+
+const DEFAULT_ENTRY = { hc: ["0x1e0d8", "0x1e320", "0x1f368"], gd: "0x1d11a", nt: "0x4740", gps: "0x34f57b8", gpe: "0x1b280", cls: "0x34f57a8", cle: "0x26e70", ers: "0x34f57b0", ere: "0xf340" };
 
 let exploitState = {
     stage: "idle",
@@ -293,6 +293,8 @@ updateHostDisplay();
 if (ipVal) ipVal.addEventListener("click", function() { const val = prompt("Enter PS5 / Target Host LAN IP:", targetHost); if (val !== null) { const trimmed = val.trim(); if (trimmed) { targetHost = trimmed; updateHostDisplay(); try { localStorage.setItem("ps5_target_ip", targetHost); } catch (e) {} } } });
 if (portVal) portVal.addEventListener("click", function() { const val = prompt("Enter Payload Port:", listenerPort); if (val !== null) { const trimmed = val.trim(); if (trimmed) { listenerPort = trimmed; updateHostDisplay(); try { localStorage.setItem("ps5_payload_port", listenerPort); } catch (e) {} } } });
 
+// Firmware detection is now best-effort only. If it can't be parsed we
+// simply fall back to the newest known offset set instead of locking the UI.
 const m = /PlayStation 5[\s\/;](\d+)\.(\d+)/.exec(navigator.userAgent);
 const fw = m ? `${m[1].padStart(2, "0")}.${m[2].padStart(2, "0")}` : null;
 
@@ -301,24 +303,43 @@ let entry = null;
 function fwNum(s) { const p = s.split("."); return parseInt(p[0], 10) * 100 + parseInt(p[1], 10); }
 function nearest(data, target) { const want = fwNum(target); const maj = target.split(".")[0]; let best = null, bestd = 1e9; for (const k in data) { if (k.split(".")[0] !== maj) continue; const d = Math.abs(fwNum(k) - want); if (d < bestd) { bestd = d; best = k; } } return best; }
 
+// The button is unlocked unconditionally - the user is responsible for
+// running this on a supported firmware. No UA / firmware gate.
+function unlockJailbreakButton() {
+    jailbreak.classList.remove("disabled");
+    renderPayloadList();
+}
+
 fetch(OFFSETS_URL, { cache: "no-store" })
     .then(function (r) { if (!r.ok) return fetch("offsets.json", { cache: "no-store" }); return r; })
     .then(function (res) { if (!res.ok) throw new Error("offsets fetch failed"); return res.json(); })
     .then(function (data) {
-        if (!fw) { msg.innerHTML = `Demo mode (<b style="color: #ffffff; font-weight: bold;">Standard Browser</b>)`; const keys = Object.keys(data); if (keys.length > 0) entry = data[keys[0]]; else entry = { hc: ["0x1e0d8", "0x1e320", "0x1f368"], gd: "0x1d11a", nt: "0x4740", gps: "0x34f57b8", gpe: "0x1b280", cls: "0x34f57a8", cle: "0x26e70", ers: "0x34f57b0", ere: "0xf340" }; jailbreak.classList.remove("disabled"); renderPayloadList(); return; }
-        entry = data[fw];
-        if (entry) { msg.innerHTML = `firmware <b style="color: #ffffff; font-weight: bold;">${fw}</b> detected & supported`; jailbreak.classList.remove("disabled"); renderPayloadList(); return; }
-        const near = nearest(data, fw);
-        if (near) { entry = data[near]; msg.innerHTML = `<b style="color: #ffffff; font-weight: bold;">${fw}</b>: no exact offsets, trying <b style="color: #ffffff; font-weight: bold;">${near}</b> (unverified)`; jailbreak.classList.remove("disabled"); renderPayloadList(); }
-        else { msg.innerHTML = `firmware <b style="color: #ffffff; font-weight: bold;">${fw}</b> not supported`; }
+        const keys = Object.keys(data);
+        const fallback = keys.length ? data[keys[0]] : DEFAULT_ENTRY;
+        if (!fw) {
+            entry = fallback;
+            msg.innerHTML = `Demo mode (<b style="color: #ffffff; font-weight: bold;">Standard Browser</b>)`;
+            unlockJailbreakButton();
+            return;
+        }
+        if (data[fw]) {
+            entry = data[fw];
+            msg.innerHTML = `firmware <b style="color: #ffffff; font-weight: bold;">${fw}</b> detected & supported`;
+        } else {
+            const near = nearest(data, fw);
+            entry = (near ? data[near] : fallback);
+            msg.innerHTML = `<b style="color: #ffffff; font-weight: bold;">${fw}</b>: no exact offsets, using ${near ? "<b style=\"color:#fff\">" + near + "</b>" : "fallback"} (unverified)`;
+        }
+        unlockJailbreakButton();
     })
-    .catch(function () { msg.textContent = "failed to load offsets (demo fallback active)"; entry = { hc: ["0x1e0d8", "0x1e320", "0x1f368"], gd: "0x1d11a", nt: "0x4740", gps: "0x34f57b8", gpe: "0x1b280", cls: "0x34f57a8", cle: "0x26e70", ers: "0x34f57b0", ere: "0xf340" }; jailbreak.classList.remove("disabled"); renderPayloadList(); });
+    .catch(function () {
+        msg.textContent = "failed to load offsets (demo fallback active)";
+        entry = DEFAULT_ENTRY;
+        unlockJailbreakButton();
+    });
 
-// Enable button immediately for demo mode (non-PS5)
-if (!fw) {
-    jailbreak.classList.remove("disabled");
-    msg.innerHTML = `Demo mode (<b style="color: #ffffff; font-weight: bold;">Standard Browser</b>)`;
-}
+// Enable button immediately (independent of the offsets fetch)
+unlockJailbreakButton();
 
 function renderPayloadList() {
     payloadList.innerHTML = "";
@@ -461,33 +482,6 @@ function getOffsetsForFirmware(fwStr) {
     const fwOffsets = FIRMWARE_OFFSETS[fwStr] || FIRMWARE_OFFSETS["13.60"];
     return { ...COMMON_OFFSETS, ...fwOffsets };
 }
-        "mov [rdi], rax": 0x3881F, "mov [rdi], eax": 0x38820,
-        "mov rax, [rax]": 0x6FD92, "add rax, rcx": 0x319FE4,
-        "cmp [rcx], eax": 0x1C4EC65, "inc dword [rax]": 0x295B95,
-        "seta al": 0x388A2, "setb al": 0x1F006, "sete al": 0x40E7,
-        "setg al": 0x1036946, "setl al": 0x31DF00,
-        "shl rax, 3": 0x1C5B743, "shl rax, 4": 0xD16072,
-        "shr rax, 3": 0xD08FE1, "shr rax, 4": 0x1ADC233,
-        "infloop": 0x1553D
-    },
-    syscall_map: {
-        0x3: 0x1BB1A, 0x4: 0x1D520, 0x5: 0x1B6E0, 0x6: 0x1B640, 0x7: 0x1BCE0,
-        0x14: 0x1B860, 0x61: 0x1C9F0, 0x14B: 0x1D560, 0x1C6: 0x1BC60,
-        0x1C7: 0x1D180, 0x1D2: 0x1D5C0, 0x1E7: 0x1C550, 0x1E8: 0x1BF00,
-        0x2AF: 0x1D100, 0x278: 0x1B500, 0x279: 0x1D790
-    },
-    KERNEL_STACK_COOKIE: 0x930,
-    KERNEL_STACK_SYS_SCHED_YIELD_RET: 0x808,
-    KERNEL_DATA: 0xCB0000,
-    KERNEL_SYS_SCHED_YIELD_RET: 0x63AC62,
-    KERNEL_ALLPROC: 0x3589E80,
-    KERNEL_SECURITY_FLAGS: 0x1A49064,
-    KERNEL_TARGETID: 0x1A4906D,
-    KERNEL_QA_FLAGS: 0x1A49088,
-    KERNEL_UTOKEN_FLAGS: 0x1A490F0,
-    KERNEL_ROOTVNODE: 0x3DE7510,
-    KERNEL_BUS_DATA_DEVICES: 0x2D481E8
-};
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -763,14 +757,11 @@ async function runFullExploitChain() {
 
 jailbreak.addEventListener("click", async () => {
     if (isJailbroken) { msg.textContent = "Already jailbroken!"; return; }
-    if (!entry) { msg.textContent = "Offsets not loaded yet."; return; }
-    
-    if (!fw) {
-        msg.textContent = "Demo mode: Exploit only runs on PS5 browser.";
-        log("Demo mode - exploit requires PS5 browser", "log-warn");
-        return;
-    }
-    
+
+    // No firmware / UA gate. If offsets failed to load we still run with the
+    // built-in fallback entry.
+    if (!entry) entry = DEFAULT_ENTRY;
+
     if (!exploitModulesLoaded) {
         msg.textContent = "Loading exploit modules...";
         log("Waiting for exploit modules to load...", "log-info");
